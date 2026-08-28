@@ -148,6 +148,9 @@ python signin.py all      # 查签到状态 + 领取（调试）
 
 凭据缺失（`NO_AUTH`）或登录态失效（`NO_SESSION`，接口 401/403 / 本地会话无效）时，脚本通过 `osascript display alert` 弹一个模态对话框提醒你重新登录。**模态对话框必然出现在前台**，比通知中心通知更不会被漏看。
 
+> [!WARNING]
+> **为什么用 `display alert` 而不是 `display notification`？** 早期版本用 `display notification`（走 macOS 通知中心），但当一个**后台/非前台 App 进程**（如 launchd 直起的 `python3`）发通知时，通知中心会把它**静默丢弃**——不报错、也不显示，前台终端跑也一样。实测改成 `display alert`（模态对话框，直接命中前台 GUI 会话，不依赖通知中心权限）后稳定弹出。所以本版默认 `display alert`，仅在其失败时退化回 `display notification`。
+
 - **去抖**：同类型提醒 6 小时内只弹一次（状态记在脚本同目录的 `.notify_state.json`），避免 21:30/22:30/唤醒补跑多次狂弹。
 - **安全失败**：弹窗失败不影响主流程（签到照常进行，失败信息照常写日志）。
 - **测试弹窗**：
@@ -176,7 +179,7 @@ python signin.py all      # 查签到状态 + 领取（调试）
 | `NO_SESSION / HTTP 401\|403` | 登录态过期——重新登录桌面端，自动化自动恢复；本版会弹窗提醒 |
 | `INACTIVE / 签到活动未开启` | 非签到季，属正常，无需处理 |
 | `Operation not permitted`（launchd 后台） | 脚本放在了 `~/Documents` 等 TCC 保护区——移到 `~/Library/Application Support/` 下，重跑 bootstrap |
-| 弹窗不出现 | 确认不是 6h 去抖（先 `rm .notify_state.json`）；若仍不弹，见上方 🔔 说明，可换成 `display notification` 退化方案 |
+| 弹窗不出现 | 先确认不是 6h 去抖（先 `rm .notify_state.json` 再测）；本版默认 `display alert`（模态对话框，稳定弹前台），若连 `display alert` 都不弹，多为极端 TCC/辅助功能限制，见上方 🔔 说明 |
 | 调试原始返回 | `python signin.py status` 或 `python signin.py all` |
 
 > [!IMPORTANT]
