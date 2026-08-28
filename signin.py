@@ -25,7 +25,9 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
 import json
 import os
 import ssl
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -164,6 +166,56 @@ def _already_report(status, via=None):
         "is_streak_day": is_streak_day,
         "next_streak_day": next_streak_day,
     }
+
+
+NOTIFY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".notify_state.json")
+NOTIFY_COOLDOWN = 6 * 3600  # 同类型通知 6 小时内不重复弹，避免多次运行刷屏
+
+
+def _load_notify_state():
+    try:
+        with open(NOTIFY_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_notify_state(state):
+    try:
+        with open(NOTIFY_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
+def _notify(kind, title, message):
+    """弹 macOS 提醒（带去抖）。
+    优先用 display alert（模态对话框，必然出现在前台，适合"请重新登录"这类不可错过提醒）；
+    若 alert 失败（如后台无 UI 会话），退化为 display notification（通知中心）。
+    通知失败不影响主流程。"""
+    now = time.time()
+    state = _load_notify_state()
+    last = state.get(kind)
+    if isinstance(last, (int, float)) and (now - last) < NOTIFY_COOLDOWN:
+        return  # 冷却中，跳过
+    try:
+        # 转义反斜杠与双引号，避免 AppleScript 语法错误
+        safe_msg = message.replace("\\", "\\\\").replace('"', '\\"')
+        safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
+        # 1) 模态对话框：必然可见，不依赖通知中心权限
+        alert = 'display alert "%s" message "%s" as warning' % (safe_title, safe_msg)
+        r = subprocess.run(["/usr/bin/osascript", "-e", alert],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if r.returncode != 0:
+            # 2) 退化：通知中心通知（后台/无 UI 时可能不显示，但尽量尝试）
+            note = ('display notification "%s" with title "%s" subtitle '
+                    '"WorkBuddy 每日签到" sound name "Glass"' % (safe_msg, safe_title))
+            subprocess.run(["/usr/bin/osascript", "-e", note],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        state[kind] = now
+        _save_notify_state(state)
+    except Exception:
+        pass
 
 
 def run_growth(headers, endpoint):
@@ -352,11 +404,21 @@ def main():
                       "或设置环境变量 WORKBUDDY_AUTH_FILE 指向 workbuddy-desktop.info。",
             "looked_in": guesses,
         }
+        _notify("no_auth", "WorkBuddy 签到未运行",
+                "未找到登录凭据，请先在本机登录 WorkBuddy 桌面端")
         print(json.dumps(out, ensure_ascii=False))
         return 2
 
     session = load_session(auth_file)
-    headers = build_headers(session)
+    try:
+        headers = build_headers(session)
+    except SystemExit:
+        _notify("no_session", "WorkBuddy 登录态失效",
+                "本地登录会话无效，请重新登录 WorkBuddy 桌面端")
+        out = {"result": "NO_SESSION",
+               "report": "本地登录会话无效（缺少 token/uid），请重新登录 WorkBuddy 桌面端"}
+        print(json.dumps(out, ensure_ascii=False))
+        return 2
     endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
 
     if action == "auto":
@@ -366,11 +428,17 @@ def main():
         out["growth"] = gout.get("report")
         if gout.get("credits_gained"):
             out["report"] += "；" + gout["report"]
+        if out.get("result") == "NO_SESSION" or gout.get("result") == "NO_SESSION":
+            _notify("no_session", "WorkBuddy 登录态失效",
+                    "签到失败：登录态已失效，请重新登录 WorkBuddy 桌面端")
         print(json.dumps(out, ensure_ascii=False))
         return code
 
     if action == "growth":
         code, out = run_growth(headers, endpoint)
+        if out.get("result") == "NO_SESSION":
+            _notify("no_session", "WorkBuddy 登录态失效",
+                    "成长中心失败：登录态已失效，请重新登录 WorkBuddy 桌面端")
         print(json.dumps(out, ensure_ascii=False))
         return code
 

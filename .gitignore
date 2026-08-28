@@ -5,3 +5,6 @@ __pycache__/
 
 # WorkBuddy local workspace data (contains credentials / memory / automation config)
 .workbuddy/
+
+# 通知去抖状态（本机运行产生，含上次弹窗时间戳，不入库）
+.notify_state.json

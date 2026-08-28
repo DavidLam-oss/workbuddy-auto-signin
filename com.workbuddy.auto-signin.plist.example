@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WorkBuddy 每日自动签到 - launchd 配置模板（macOS）
+  ------------------------------------------------------------
+  用法：
+    1. 复制为 ~/Library/LaunchAgents/com.workbuddy.auto-signin.plist
+    2. 把下面 ProgramArguments / WorkingDirectory 里的
+       /PATH/TO/workbuddy-auto-signin 改成你真实的脚本目录绝对路径
+       ⚠️ 不要放在 ~/Documents、~/Desktop、~/Downloads 下！
+          macOS 隐私保护(TCC)会拦截后台进程读取这些目录，报
+          "Operation not permitted"。推荐放在 ~/Library/Application Support/ 下。
+    3. 终端加载：
+         launchctl bootout gui/$(id -u)/com.workbuddy.auto-signin 2>/dev/null; \
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.workbuddy.auto-signin.plist
+  行为：
+    - StartCalendarInterval：每天 21:30 与 22:30 各触发一次（可按需增减/改时间）
+    - RunAtLoad：开机/登录立即跑一次 = 补领
+    - 沉睡错过的时间点：launchd 在唤醒后自动补跑（脚本幂等，不会重复领）
+    - 凭据失效时：脚本弹系统对话框提醒你重新登录（见 signin.py 的 _notify）
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.workbuddy.auto-signin</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/PATH/TO/workbuddy-auto-signin/signin.py</string>
+        <string>auto</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/PATH/TO/workbuddy-auto-signin</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>21</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>22</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/workbuddy-auto-signin.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/workbuddy-auto-signin.err</string>
+</dict>
+</plist>
