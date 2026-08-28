@@ -14,6 +14,8 @@
 
 </div>
 
+> 🌐 **English documentation**: [README.en.md](README.en.md)
+
 > 🍴 **本仓库是 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) (MIT) 的增强 fork**，原仓库的零依赖单文件签到脚本完全保留，我们在此基础上补了两件事：**① 登录态失效时弹 macOS 系统对话框提醒你重新登录；② 附一份 launchd 定时模板，支持多时间点 + 开机/唤醒补领，并记录了一个 TCC 踩坑。** 协议仍为 MIT，版权归 88lin，增强部分归 DavidLam-oss。
 
 > 一个自包含的 Python 脚本，每天自动帮你领取 **WorkBuddy**（腾讯 AI 编程助手）的每日签到积分。只读取你自己机器上的登录态，零内置密钥，可安全分享。
