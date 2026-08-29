@@ -14,8 +14,13 @@
          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.workbuddy.auto-signin.plist
   行为：
     - StartCalendarInterval：每天 21:30 与 22:30 各触发一次（可按需增减/改时间）
+    - StartInterval：每 30 分钟自查一次；Mac 醒着时即触发，配合脚本幂等，
+      保证"只要当天开过机/唤过醒就会签到"。推荐保留，弥补 RunAtLoad
+      不响应纯睡眠→唤醒的缺口。
     - RunAtLoad：开机/登录立即跑一次 = 补领
-    - 沉睡错过的时间点：launchd 在唤醒后自动补跑（脚本幂等，不会重复领）
+    - 关于"睡眠唤醒"：RunAtLoad 只在开机/登录时跑，睡眠→唤醒不会触发它；
+      StartCalendarInterval 仅补跑"睡眠期间真正错过的时间点"。若想"早上开盖就签到"，
+      靠的是 StartInterval（或当晚 21:30/22:30 的定时），而非 RunAtLoad。
     - 凭据失效时：脚本弹系统对话框提醒你重新登录（见 signin.py 的 _notify）
 -->
 <plist version="1.0">
@@ -45,6 +50,8 @@
             <integer>30</integer>
         </dict>
     </array>
+    <key>StartInterval</key>
+    <integer>1800</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

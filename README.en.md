@@ -118,9 +118,10 @@ The most reliable option is macOS's native **launchd** user agent: it doesn't de
 
 **Behavior**:
 - `StartCalendarInterval`: fires once each at **21:30 and 22:30** daily (the array can be extended or times changed).
+- `StartInterval`: self-checks every **30 minutes**; fires whenever the Mac is awake. Combined with the script's idempotency, this guarantees "if you booted or woke the Mac at all today, it claims" — this is what makes "auto-claim on opening the lid in the morning" work, because `RunAtLoad` **only runs on boot/login, NOT on a plain sleep→wake**.
 - `RunAtLoad`: runs once on every boot / login = **catch-up claim**.
-- **Sleep catch-up**: if the Mac is asleep at the scheduled time, launchd auto-runs the missed slot on wake; the script is idempotent, so multiple catch-up runs claim only once.
-- **Not covered**: if the machine stays off all day and is never booted that day, that day is missed; but as long as you boot/login once that day, `RunAtLoad` guarantees one run as a fallback.
+- **Sleep catch-up (limited)**: if the Mac is asleep at 21:30/22:30, launchd catches up those missed slots on wake; but when you open the lid in the morning, today's slots are still in the future with nothing to catch up, so wake alone won't claim — that gap is covered by `StartInterval` above.
+- **Not covered**: if the machine stays off all day and is never booted that day, that day is missed; but as long as you boot/login once that day, or wake and stay awake ≥30 min, `StartInterval` guarantees one run as a fallback.
 
 ---
 
