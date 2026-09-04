@@ -14,7 +14,7 @@ Zero dependencies · Pure standard library · Cross-platform · Idempotent & saf
 
 </div>
 
-> 🍴 **This repo is an enhanced fork of [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) (MIT).** The original zero-dependency single-file check-in script is fully preserved; on top of it we added two things: **① a macOS system dialog that reminds you to re-login when the session expires; ② a launchd timer template supporting multiple trigger times + catch-up on boot/wake, plus a documented TCC gotcha.** Still MIT; copyright belongs to 88lin, enhancements to DavidLam-oss.
+> 🍴 **This repo is an enhanced fork of [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) (MIT).** The original zero-dependency single-file check-in script is fully preserved; on top of it we added several things: **① a macOS system dialog that reminds you to re-login when the session expires; ② a launchd timer template supporting multiple trigger times + catch-up on boot/wake, plus a documented TCC gotcha; ③ automatic streak-tier redemption in the Growth Center; ④ network fault tolerance so a transient network blip never spams your logs with tracebacks.** Still MIT; copyright belongs to 88lin, enhancements to DavidLam-oss.
 
 > A self-contained Python script that automatically claims your **WorkBuddy** (Tencent's AI coding assistant) daily check-in credits every day. It only reads the login state on *your* machine, ships no secrets, and is safe to share.
 
@@ -42,17 +42,42 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 | 📦 | **Single file** — fully self-contained |
 | 🔁 | **Idempotent & safe** — checks status first, only claims if not yet claimed; running repeatedly never double-claims |
 | 🐱 | **Growth Center** — auto-claims Buddy travel gifts, dispatches Buddy, opens blind boxes, claims task rewards |
+| 🎁 | **🆕 Streak tier redemption** — auto-redeems the 7 / 14 / 28-day streak tiers (14 days → 50 credits, 28 days → 150 credits) |
 | 🧠 | **Smart report** — one line of JSON, e.g. `Successfully claimed 100 credits (7-day streak, 700 total)` |
 | 🛡️ | **Robust** — handles both "already claimed" response shapes, detects 401/403 session expiry, detects off-season |
 | 🌐 | **Cross-platform** — auto-detects Windows / macOS / Linux credential files |
 | 🔒 | **No secrets** — the repo contains no keys; it only reads the runner's local credentials |
 | 🔔 | **🆕 Session-expiry dialog** — when credentials are missing / session expired, pops a macOS system dialog reminding you to re-login (6-hour cooldown, no spam) |
+| 🌐 | **🆕 Network fault tolerance** — on a network blip (e.g. Wi-Fi not ready right after wake), retries once; if still down, prints a clean JSON + exit code 3 instead of dumping a traceback; the 30-min timer retries automatically |
 
 ### 🆕 What's new vs. the original
 
 - **🔔 Session-expiry dialog**: the original only wrote `NO_SESSION` to the log; this fork uses `osascript display alert` to pop a **modal dialog** (always appears in the foreground, no Notification Center permission needed) telling you clearly "please re-login to the WorkBuddy desktop client". Same type only pops once per 6 hours.
 - **🍎 launchd timer template**: ships `com.workbuddy.auto-signin.plist.example` with multiple daily times + `RunAtLoad` (catch-up on boot/login) + auto catch-up after sleep-wake. More reliable than an in-app WorkBuddy automation — doesn't depend on WorkBuddy running at the time.
 - **📝 TCC gotcha documented**: records that a launchd background process reading `~/Documents` is blocked by macOS privacy protection (`Operation not permitted`), with the workaround of placing it under `~/Library/Application Support/`.
+- **🎁 Streak tier redemption**: the original only queries `/streak` status and **never redeems**. This fork auto-calls the redemption endpoint when a tier unlocks — see the dedicated chapter below.
+
+---
+
+### 🎁 Streak tier redemption (🆕)
+
+The Growth Center's streak has three reward tiers at **7 / 14 / 28 days**, and they **must be manually redeemed** — they expire if you don't claim them:
+
+| Tier | Credits | Energy | Make-up card | Blind-box chance |
+|:---:|:---:|:---:|:---:|:---:|
+| 7-day streak | — | +2 | +1 | +1 |
+| 14-day streak | **+50** | +3 | +1 | +1 |
+| 28-day streak | **+150** | +5 | +1 | +1 |
+
+Every run reads `POST /v2/activity/growth/streak`'s `redemption_status` and **only redeems a tier when its status is "unlocked and not yet claimed"** — `locked` / `claimed` are always skipped. A redemption failure is only written to the report and never blocks the check-in you already completed.
+
+> **⚠️ About the endpoint: located, but the payload is inferred**
+>
+> The redemption endpoint `POST /v2/activity/growth/redeem` was **confirmed to exist by actual probing** (not a 404; it returns a structured error). The request body `{"tier": <days int>}` is based on:
+> - passing `tier` as a string → `invalid redemption request` (JSON binding failure, proving the field is an int)
+> - passing `tier` as any integer → uniformly `invalid request` (`-1`/`0`/`1`/`7`/`14`/`28`/`100` all identical, **no enum validation**, meaning the rejection happens at a unified business layer = tier not yet unlocked)
+>
+> Because the probing account only had a 5-day streak at the time (below the 7-day threshold), **a real redemption has not yet been tested in an "unlocked" state**. If your log first shows `兑换 7d 档失败（HTTP 400 invalid request）` when you reach the 7-day tier, it means the payload needs more fields — paste that log line and we'll keep calibrating.
 
 ---
 

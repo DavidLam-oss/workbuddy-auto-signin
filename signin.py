@@ -81,7 +81,25 @@ def build_headers(session):
     return headers
 
 
-def _request(url, headers, method="GET", payload=None):
+class NetworkError(Exception):
+    """网络层不可用：DNS 解析失败、连接超时、连接被重置等。
+
+    与 HTTP 状态码错误不同（那是有响应的服务端错误），这类错误意味着请求
+    根本没送达。典型场景：Mac 刚唤醒时 launchd 立刻触发本脚本，而 Wi-Fi
+    尚未就绪，于是 getaddrinfo 失败。属于可自愈的瞬时故障 —— 不弹通知打扰
+    用户，交给下一次定时运行重试即可。
+    """
+
+
+NETWORK_RETRY_DELAY = 2  # 秒：网络失败后短暂等待再重试一次
+
+
+def _err_text(e):
+    """把异常压成一行短文本，用于 JSON 汇报。"""
+    return ((str(e) or e.__class__.__name__).strip() or e.__class__.__name__)[:120]
+
+
+def _request(url, headers, method="GET", payload=None, _retry=1):
     body = None
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
@@ -100,6 +118,14 @@ def _request(url, headers, method="GET", payload=None):
             return e.code, json.loads(raw)
         except Exception:
             return e.code, {"raw": raw[:500]}
+    except (urllib.error.URLError, OSError) as e:
+        # 网络不可达：先短暂重试一次（覆盖"唤醒瞬间网络未就绪"），
+        # 仍失败则抛 NetworkError，由上层输出干净结果而不是 traceback。
+        if _retry > 0:
+            time.sleep(NETWORK_RETRY_DELAY)
+            return _request(url, headers, method=method, payload=payload,
+                            _retry=_retry - 1)
+        raise NetworkError(_err_text(e))
 
 
 def post(url, headers, payload=None):
@@ -218,6 +244,62 @@ def _notify(kind, title, message):
         pass
 
 
+def redeem_streak_tiers(headers, endpoint, streak_body):
+    """连签档位兑换：7d / 14d / 28d 三档奖励。
+
+    端点 POST {endpoint}/v2/activity/growth/redeem，body {"tier": <天数 int>}。
+
+    payload 结构说明（由探测推断，尚未在"档位已解锁"状态下实测）：
+      - tier 传字符串  -> "invalid redemption request"（JSON 绑定失败 => 字段是 int）
+      - tier 传任意整数 -> 一律 "invalid request"（无枚举校验，说明拒绝发生在
+                            统一业务层，即档位未解锁）
+    因此这里只在档位状态为"非 locked 且未领过"时才发请求，
+    失败只记录不抛错，不影响签到主流程。
+    """
+    data = (streak_body or {}).get("data") or {}
+    rs = data.get("redemption_status") or {}
+    tiers = rs.get("tiers") or []
+    if not tiers:
+        return 0, []
+
+    parts = []
+    credits = 0
+    for t in tiers:
+        tier_key = t.get("tier")            # "7d" / "14d" / "28d"
+        days = t.get("days")                # 7 / 14 / 28
+        if not tier_key or not isinstance(days, int):
+            continue
+        status = rs.get("tier_%s_status" % tier_key)
+        already = rs.get("tier_%s_count" % tier_key)
+        # 只在"已解锁且未领过"时尝试；locked / claimed 直接跳过
+        if status in (None, "", "locked", "claimed") or already:
+            continue
+
+        code, body = post(endpoint + "/v2/activity/growth/redeem",
+                          headers, {"tier": days})
+        msg = ""
+        if isinstance(body, dict):
+            msg = str(body.get("msg") or body.get("error_msg") or "")[:80]
+        ok = (200 <= code < 300) and isinstance(body, dict) and body.get("code") == 0
+        if ok:
+            rc = t.get("credit") or 0
+            credits += rc
+            bits = ["兑换 %s 档" % tier_key]
+            if rc:
+                bits.append("+%s 积分" % rc)
+            if t.get("energy"):
+                bits.append("+能量%s" % t.get("energy"))
+            if t.get("cards"):
+                bits.append("+补签卡%s" % t.get("cards"))
+            if t.get("chances"):
+                bits.append("+盲盒机会%s" % t.get("chances"))
+            parts.append("".join(bits))
+        else:
+            # 失败只记录，供后续校正 payload 结构
+            parts.append("兑换 %s 档失败（HTTP %s %s）" % (tier_key, code, msg))
+    return credits, parts
+
+
 def run_growth(headers, endpoint):
     """成长中心自动化：领旅行礼物→派 Buddy 出发→开盲盒→领任务奖→汇报。"""
     base = endpoint + "/v2/activity/growth"
@@ -291,6 +373,16 @@ def run_growth(headers, endpoint):
     scode2, sbody2 = get(base + "/streak", headers)
     streak_obj = dig(sbody2, "streak") or {}
     streak_days = streak_obj.get("days") if isinstance(streak_obj, dict) else None
+
+    # --- 5. 连签档位兑换（7d / 14d / 28d）---
+    try:
+        rcredits, rparts = redeem_streak_tiers(headers, endpoint, sbody2)
+        credits_gained += rcredits
+        parts.extend(rparts)
+    except NetworkError:
+        parts.append("连签兑换跳过（网络不可用）")
+    except Exception as e:  # 兑换是增强项，任何异常都不应影响已完成的签到
+        parts.append("连签兑换跳过（%s）" % _err_text(e))
 
     tail = []
     if energy is not None:
@@ -422,9 +514,20 @@ def main():
     endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
 
     if action == "auto":
-        code, out = run_auto(headers, endpoint)
-        # 签到后顺带跑成长中心
-        gcode, gout = run_growth(headers, endpoint)
+        try:
+            code, out = run_auto(headers, endpoint)
+        except NetworkError as e:
+            print(json.dumps({
+                "result": "NETWORK_ERROR",
+                "report": "网络不可用（%s），签到未执行；将在下次定时运行时自动重试" % _err_text(e),
+            }, ensure_ascii=False))
+            return 3
+        # 签到后顺带跑成长中心；成长中心的网络异常不应吞掉签到结果
+        try:
+            gcode, gout = run_growth(headers, endpoint)
+        except NetworkError as e:
+            gout = {"result": "NETWORK_ERROR",
+                    "report": "网络不可用，跳过成长中心（%s）" % _err_text(e)}
         out["growth"] = gout.get("report")
         if gout.get("credits_gained"):
             out["report"] += "；" + gout["report"]
@@ -435,7 +538,14 @@ def main():
         return code
 
     if action == "growth":
-        code, out = run_growth(headers, endpoint)
+        try:
+            code, out = run_growth(headers, endpoint)
+        except NetworkError as e:
+            print(json.dumps({
+                "result": "NETWORK_ERROR",
+                "report": "网络不可用（%s），成长中心未执行；将在下次定时运行时自动重试" % _err_text(e),
+            }, ensure_ascii=False))
+            return 3
         if out.get("result") == "NO_SESSION":
             _notify("no_session", "WorkBuddy 登录态失效",
                     "成长中心失败：登录态已失效，请重新登录 WorkBuddy 桌面端")
@@ -443,15 +553,35 @@ def main():
         return code
 
     if action in ("status", "all"):
-        scode, sbody = post(endpoint + "/v2/billing/meter/checkin-activity-status", headers)
+        try:
+            scode, sbody = post(endpoint + "/v2/billing/meter/checkin-activity-status", headers)
+        except NetworkError as e:
+            print(json.dumps({"step": "status", "result": "NETWORK_ERROR",
+                              "report": "网络不可用（%s）" % _err_text(e)},
+                             ensure_ascii=False))
+            return 3
         print(json.dumps({"step": "status", "http": scode, "body": sbody}, ensure_ascii=False))
 
     if action in ("claim", "all"):
-        ccode, cbody = post(endpoint + "/v2/billing/meter/daily-checkin", headers)
+        try:
+            ccode, cbody = post(endpoint + "/v2/billing/meter/daily-checkin", headers)
+        except NetworkError as e:
+            print(json.dumps({"step": "claim", "result": "NETWORK_ERROR",
+                              "report": "网络不可用（%s）" % _err_text(e)},
+                             ensure_ascii=False))
+            return 3
         print(json.dumps({"step": "claim", "http": ccode, "body": cbody}, ensure_ascii=False))
 
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except NetworkError as e:
+        # 兜底：任何逃逸到顶层的网络异常都输出干净 JSON，不往日志里吐 traceback
+        print(json.dumps({
+            "result": "NETWORK_ERROR",
+            "report": "网络不可用（%s），本次未执行；将在下次定时运行时自动重试" % _err_text(e),
+        }, ensure_ascii=False))
+        sys.exit(3)
