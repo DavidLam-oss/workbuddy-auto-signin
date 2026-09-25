@@ -99,9 +99,28 @@ WorkBuddy 桌面端 **5.3.x 起**把 `workbuddy-desktop.info` 里的 accessToken
 
 ---
 
+## 🧭 客户端变动排查指南（经验教训）
+
+官方客户端升级后脚本再挂时，按这条路径排查（2026-09 5.3.x 加密事件实战总结）：
+
+1. **先看症状分类**：日志全是 `HTTP 401` 且凭据文件最近被客户端更新过 → 大概率是凭据存储变了。看文件里有没有 `$wbEncrypted` 标记、体积是否暴涨（3.4KB→7.2KB 即加密信号）。token 未过期（`expiresAt` 很远）却 401，必是本地读取问题，不是登录问题。
+2. **密钥只藏在客户端二进制里**：磁盘浅层、Keychain 都不会有明文。最快的提取通道是 WorkBuddy 的 Electron 二进制本身：
+   ```bash
+   ELECTRON_RUN_AS_NODE=1 /Applications/WorkBuddy.app/Contents/MacOS/Electron -e \
+     "console.log(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())"
+   ```
+   binding 名变了就到 asar / Framework 二进制里搜（如 `electron_browser_*_storage`）。
+3. **注意运行模式陷阱**：从终端/脚本调 Electron 二进制时环境里可能残留 `ELECTRON_RUN_AS_NODE=1`（例如跑在 WorkBuddy 会话的 shell 里）， unset 再跑；不带该变量直接跑则会启动真 app、被单实例锁拦下。
+4. **加密细节速查**（`packages/at-rest-crypto`，suite 1 / sym-v1）：AES-256-GCM，nonce 12B、authTag 16B；AAD = `"WB-AAD\0"` + `[1]` + lenPref(`WBEV1`) + lenPref(`sym-v1`) + uint32(suite) + lenPref(keyId) + framing 码（field=2）+ 序列/终结标记。**不要做 keyId 前置校验**——派生 keyId 可能与信封不一致但密钥仍然正确，以 authTag 校验为准。字段明文可能是裸字符串（如 JWT），`JSON.parse` 失败要回退原样返回。
+5. **逆向入口**：`app.asar` 里 grep `at-rest-crypto` / `credential-protection` 定位字节偏移，再用 Python 按偏移分块抽上下文（**283MB asar 直接全文件 grep 宽正则会被 SIGTERM**）。
+6. **别走副本 bundle 的弯路**：改副本 + `codesign --deep` 重签会丢 entitlements（`allow-jit` 等）导致 Electron 静默退出；签名 app 也不会把 argv 当 app 目录加载。
+7. **改完先实测**：跑一次 `signin.py auto` 看 JSON 汇报，再等一个 launchd 周期确认日志恢复。
+
+---
+
 ## ⚙️ 工作原理
 
-登录后，WorkBuddy 桌面端写出明文 JSON 会话文件 `workbuddy-desktop.info`（含 `accessToken`）。脚本流程：
+登录后，WorkBuddy 桌面端写出 JSON 会话文件 `workbuddy-desktop.info`（含 `accessToken`；5.3.x 起为静态加密存储，本脚本会自动解密，见上文专章）。脚本流程：
 
 1. 📂 **定位**凭据文件（自动探测，或用 `WORKBUDDY_AUTH_FILE` 覆盖）
 2. 🔍 **查询** `POST /v2/billing/meter/checkin-activity-status` — 今天是否已领？

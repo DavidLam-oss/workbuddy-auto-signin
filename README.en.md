@@ -99,6 +99,25 @@ This fork's adaptation (`wbcred.js` + `signin.py` working together):
 
 ---
 
+## 🧭 Troubleshooting guide when the client changes (lessons learned)
+
+When a client upgrade breaks the script again, follow this path ( distilled from the 2026-09 5.3.x encryption incident):
+
+1. **Classify the symptom first**: all logs are `HTTP 401` and the credential file was recently rewritten by the client → the credential storage likely changed. Look for a `$wbEncrypted` marker and a file-size jump (3.4KB → 7.2KB = encrypted). If the token is far from expiry (`expiresAt`) yet you get 401, it's a local read problem, not a login problem.
+2. **The key only lives inside the client binary**: neither shallow disk paths nor the Keychain will hold it in plaintext. The fastest extraction channel is WorkBuddy's own Electron binary:
+   ```bash
+   ELECTRON_RUN_AS_NODE=1 /Applications/WorkBuddy.app/Contents/MacOS/Electron -e \
+     "console.log(process._linkedBinding('electron_browser_workbuddy_storage').loggerGet())"
+   ```
+   If the binding name changed, grep the asar / Framework binary for `electron_browser_*_storage`.
+3. **Watch the runtime-mode trap**: when invoking the Electron binary from a terminal/script, the environment may already carry `ELECTRON_RUN_AS_NODE=1` (e.g. inside a WorkBuddy session shell) — unset it first; without the variable it launches the real app and hits the single-instance lock.
+4. **Crypto details quick reference** (`packages/at-rest-crypto`, suite 1 / sym-v1): AES-256-GCM, 12-byte nonce, 16-byte authTag; AAD = `"WB-AAD\0"` + `[1]` + lenPref(`WBEV1`) + lenPref(`sym-v1`) + uint32(suite) + lenPref(keyId) + framing code (field=2) + sequence/final markers. **Do not pre-validate keyId** — the derived keyId may differ from the envelope's while the key is still correct; trust the authTag check. Field plaintexts may be raw strings (e.g. JWTs) — fall back to returning the raw string when `JSON.parse` fails.
+5. **Reverse-engineering entry points**: grep `at-rest-crypto` / `credential-protection` in `app.asar` for byte offsets, then extract context around those offsets with Python chunked reads (**grepping the full 283MB asar with a broad regex gets SIGTERMed**).
+6. **Don't take the modified-bundle detour**: `codesign --deep` re-signing of a copied bundle drops entitlements (`allow-jit` etc.) and Electron exits silently; signed apps also ignore an argv app-directory path.
+7. **Verify before shipping**: run `signin.py auto` once and check the JSON report, then wait one launchd cycle to confirm the log recovers.
+
+---
+
 ## ⚙️ How it works
 
 After login, the WorkBuddy desktop client writes a JSON session file `workbuddy-desktop.info` (containing `accessToken`; encrypted at rest on 5.3.x+, which this fork decrypts automatically — see the chapter above). The script flow:
