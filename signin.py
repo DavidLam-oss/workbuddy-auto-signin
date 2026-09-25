@@ -54,9 +54,79 @@ def find_auth_file():
     return None
 
 
+def _has_encrypted_fields(node):
+    """递归检测凭据对象中是否存在 $wbEncrypted 加密字段（桌面端 5.3.x+ 静态加密）。"""
+    if isinstance(node, dict):
+        if node.get("$wbEncrypted") == 1:
+            return True
+        return any(_has_encrypted_fields(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_encrypted_fields(v) for v in node)
+    return False
+
+
+def _find_electron_bin():
+    """定位 WorkBuddy 桌面端二进制（解密 helper 需在它内部运行才能拿到 native 密钥）。"""
+    override = os.environ.get("WORKBUDDY_ELECTRON_BIN")
+    if override:
+        return override
+    home = os.path.expanduser("~")
+    local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    candidates = [
+        "/Applications/WorkBuddy.app/Contents/MacOS/Electron",                # macOS
+        os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"),        # Windows
+        "/opt/WorkBuddy/workbuddy",                                           # Linux
+        "/usr/bin/workbuddy",                                                 # Linux
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _decrypt_credentials(auth_file):
+    """调用 wbcred.js（Node helper）解密加密凭据，返回 (session_dict|None, 原因)。
+
+    helper 必须以 ELECTRON_RUN_AS_NODE=1 用 WorkBuddy 二进制运行：密钥由魔改
+    Framework 的 native binding 提供，不落盘、不经过本脚本。
+    """
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wbcred.js")
+    electron = _find_electron_bin()
+    if not electron:
+        return None, "未找到 WorkBuddy 桌面端二进制（可设 WORKBUDDY_ELECTRON_BIN 指定）"
+    if not os.path.exists(helper):
+        return None, "wbcred.js 缺失（与 signin.py 同目录）"
+    env = dict(os.environ)
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    try:
+        proc = subprocess.run(
+            [electron, helper, auth_file],
+            capture_output=True, text=True, timeout=20, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "解密 helper 超时"
+    except OSError as e:
+        return None, "无法启动解密 helper: %s" % e
+    try:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return None, "解密 helper 输出异常"
+    if data.get("result") != "OK":
+        return None, "解密失败（%s）%s" % (data.get("result"), data.get("detail", ""))
+    return data.get("session") or None, None
+
+
 def load_session(auth_file):
     with open(auth_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+        session = json.load(f)
+    if _has_encrypted_fields(session):
+        sys.stderr.write("凭据为加密存储（桌面端 5.3.x+），调用解密 helper...\n")
+        decrypted, reason = _decrypt_credentials(auth_file)
+        if decrypted and (decrypted.get("auth") or {}).get("accessToken"):
+            return decrypted
+        # 解密失败：回退原始内容，让上层按 NO_SESSION 流程提示（不中断、不吞错）
+        sys.stderr.write("解密未成功：%s\n" % (reason or "未知原因"))
+    return session
 
 
 def build_headers(session):

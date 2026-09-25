@@ -51,6 +51,7 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 | 🔒 | **无密钥** — 仓库不含任何密钥，只读取运行者本机登录凭据 |
 | 🔔 | **🆕 失效弹窗提醒** — 凭据缺失 / 登录态失效时，弹 macOS 系统对话框提醒你重新登录（6 小时去抖，不刷屏） |
 | 🌐 | **🆕 网络容错** — 网络异常（如刚唤醒 Wi-Fi 未连上）自动重试一次，仍失败则输出干净 JSON + 退出码 3，**不再吐 traceback 污染日志**；30 分钟后自动重试 |
+| 🔐 | **🆕 加密凭据解密** — 自动解密桌面端 5.3.x+ 的静态加密凭据（`$wbEncrypted`），令牌不落盘、不打印 |
 
 ### 🆕 相比原版新增
 
@@ -58,6 +59,7 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 - **🍎 launchd 定时模板**：提供 `com.workbuddy.auto-signin.plist.example`，每天多个时间点 + `RunAtLoad`（开机/登录补领）+ 沉睡唤醒后自动补跑。比 WorkBuddy 应用内自动化更稳——不依赖 WorkBuddy 当时在运行。
 - **📝 TCC 踩坑文档**：记录了 launchd 后台进程读取 `~/Documents` 会被 macOS 隐私保护拦截（`Operation not permitted`）的现象，并给出"放到 `~/Library/Application Support/`"的绕过方法。
 - **🎁 连签档位兑换**：原版只查询 `/streak` 状态、**从不兑换**。本版会在档位解锁时自动调用兑换端点领奖，见下方专章。
+- **🔐 加密凭据解密**：适配桌面端 5.3.x+ 的凭据静态加密（详见下方专章）。
 
 ### 🎁 连签档位兑换（🆕）
 
@@ -78,6 +80,22 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 > - `tier` 传任意整数 → 一律 `invalid request`（`-1`/`0`/`1`/`7`/`14`/`28`/`100` 无差别，**没有枚举校验**，说明拒绝发生在统一业务层 = 档位未解锁）
 >
 > 由于探测时账号连签仅 5 天（未达 7 天门槛），**真实兑换尚未在"已解锁"状态下实测过**。若你首次到达 7 天档时日志出现 `兑换 7d 档失败（HTTP 400 invalid request）`，说明 payload 还需补字段——把那行日志贴出来即可继续校正。
+
+### 🔐 加密凭据自动解密（🆕）
+
+WorkBuddy 桌面端 **5.3.x 起**把 `workbuddy-desktop.info` 里的 accessToken 等敏感字段改为**静态加密**存储（`{"$wbEncrypted":1,"envelope":"..."}`，AES-256-GCM）。原版脚本直接读明文字段，会拿到密文当 Bearer 发出去——服务端 401，签到从此全挂。
+
+本版的适配方式（`wbcred.js` + `signin.py` 联动）：
+
+1. `signin.py` 检测到凭据文件里有 `$wbEncrypted` 字段时，自动调用解密 helper `wbcred.js`；
+2. `wbcred.js` 由 **WorkBuddy 自带的 Electron 二进制**以 `ELECTRON_RUN_AS_NODE=1` 运行——解密密钥由客户端 Framework 里的 native binding（`electron_browser_workbuddy_storage`）**运行时现取**，不落盘、不进配置；
+3. helper 解出明文会话后以单行 JSON 交还 `signin.py`，其余逻辑（签到/成长中心/兑换/汇报）完全不变。
+
+**注意事项**：
+
+- 需要 WorkBuddy 客户端安装在标准路径（`/Applications/WorkBuddy.app`）；自定义安装位置时设环境变量 `WORKBUDDY_ELECTRON_BIN` 指向其二进制。
+- 客户端**轮换密钥后无需任何操作**——密钥每次运行时现取，自动跟随。
+- 若客户端未运行/密钥不可用，脚本回退为 `NO_SESSION` 流程（含弹窗提醒），不会崩、不会写脏日志。
 
 ---
 

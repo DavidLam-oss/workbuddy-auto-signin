@@ -14,7 +14,7 @@ Zero dependencies · Pure standard library · Cross-platform · Idempotent & saf
 
 </div>
 
-> 🍴 **This repo is an enhanced fork of [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) (MIT).** The original zero-dependency single-file check-in script is fully preserved; on top of it we added several things: **① a macOS system dialog that reminds you to re-login when the session expires; ② a launchd timer template supporting multiple trigger times + catch-up on boot/wake, plus a documented TCC gotcha; ③ automatic streak-tier redemption in the Growth Center; ④ network fault tolerance so a transient network blip never spams your logs with tracebacks.** Still MIT; copyright belongs to 88lin, enhancements to DavidLam-oss.
+> 🍴 **This repo is an enhanced fork of [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) (MIT).** The original zero-dependency single-file check-in script is fully preserved; on top of it we added several things: **① a macOS system dialog that reminds you to re-login when the session expires; ② a launchd timer template supporting multiple trigger times + catch-up on boot/wake, plus a documented TCC gotcha; ③ automatic streak-tier redemption in the Growth Center; ④ network fault tolerance so a transient network blip never spams your logs with tracebacks; ⑤ decryption of the desktop client 5.3.x+ at-rest encrypted credentials.** Still MIT; copyright belongs to 88lin, enhancements to DavidLam-oss.
 
 > A self-contained Python script that automatically claims your **WorkBuddy** (Tencent's AI coding assistant) daily check-in credits every day. It only reads the login state on *your* machine, ships no secrets, and is safe to share.
 
@@ -49,6 +49,7 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 | 🔒 | **No secrets** — the repo contains no keys; it only reads the runner's local credentials |
 | 🔔 | **🆕 Session-expiry dialog** — when credentials are missing / session expired, pops a macOS system dialog reminding you to re-login (6-hour cooldown, no spam) |
 | 🌐 | **🆕 Network fault tolerance** — on a network blip (e.g. Wi-Fi not ready right after wake), retries once; if still down, prints a clean JSON + exit code 3 instead of dumping a traceback; the 30-min timer retries automatically |
+| 🔐 | **🆕 Encrypted credential decryption** — automatically decrypts the at-rest encrypted credentials (`$wbEncrypted`) of desktop client 5.3.x+; tokens never touch disk or logs |
 
 ### 🆕 What's new vs. the original
 
@@ -56,6 +57,7 @@ https://github.com/DavidLam-oss/workbuddy-auto-signin
 - **🍎 launchd timer template**: ships `com.workbuddy.auto-signin.plist.example` with multiple daily times + `RunAtLoad` (catch-up on boot/login) + auto catch-up after sleep-wake. More reliable than an in-app WorkBuddy automation — doesn't depend on WorkBuddy running at the time.
 - **📝 TCC gotcha documented**: records that a launchd background process reading `~/Documents` is blocked by macOS privacy protection (`Operation not permitted`), with the workaround of placing it under `~/Library/Application Support/`.
 - **🎁 Streak tier redemption**: the original only queries `/streak` status and **never redeems**. This fork auto-calls the redemption endpoint when a tier unlocks — see the dedicated chapter below.
+- **🔐 Encrypted credential decryption**: supports the desktop client 5.3.x+ at-rest credential encryption (see the dedicated chapter below).
 
 ---
 
@@ -79,11 +81,27 @@ Every run reads `POST /v2/activity/growth/streak`'s `redemption_status` and **on
 >
 > Because the probing account only had a 5-day streak at the time (below the 7-day threshold), **a real redemption has not yet been tested in an "unlocked" state**. If your log first shows `兑换 7d 档失败（HTTP 400 invalid request）` when you reach the 7-day tier, it means the payload needs more fields — paste that log line and we'll keep calibrating.
 
+### 🔐 Encrypted credential decryption (🆕)
+
+Starting with desktop client **5.3.x**, WorkBuddy stores sensitive fields in `workbuddy-desktop.info` **encrypted at rest** (`{"$wbEncrypted":1,"envelope":"..."}`, AES-256-GCM). The original script reads the plaintext field, gets the ciphertext, and sends it as a Bearer token — the server replies 401 and every check-in fails.
+
+This fork's adaptation (`wbcred.js` + `signin.py` working together):
+
+1. `signin.py` detects `$wbEncrypted` fields in the credential file and automatically invokes the decryption helper `wbcred.js`;
+2. `wbcred.js` runs under the **WorkBuddy app's own Electron binary** with `ELECTRON_RUN_AS_NODE=1` — the decryption key is fetched **at runtime** from the native binding inside the client's Framework (`electron_browser_workbuddy_storage`); it never touches disk or config files;
+3. The helper returns the decrypted session as a single-line JSON to `signin.py`; everything else (check-in / Growth Center / redemption / reporting) is unchanged.
+
+**Notes**:
+
+- The WorkBuddy client must be installed at the standard path (`/Applications/WorkBuddy.app`); for custom locations, set `WORKBUDDY_ELECTRON_BIN` to the binary path.
+- **Key rotation requires no action** — the key is fetched fresh on every run and follows the client automatically.
+- If the client isn't running / the key is unavailable, the script falls back to the `NO_SESSION` flow (including the dialog reminder) — no crash, no dirty logs.
+
 ---
 
 ## ⚙️ How it works
 
-After login, the WorkBuddy desktop client writes a plaintext JSON session file `workbuddy-desktop.info` (containing `accessToken`). The script flow:
+After login, the WorkBuddy desktop client writes a JSON session file `workbuddy-desktop.info` (containing `accessToken`; encrypted at rest on 5.3.x+, which this fork decrypts automatically — see the chapter above). The script flow:
 
 1. 📂 **Locate** the credential file (auto-detected, or override with `WORKBUDDY_AUTH_FILE`)
 2. 🔍 **Query** `POST /v2/billing/meter/checkin-activity-status` — claimed today?
