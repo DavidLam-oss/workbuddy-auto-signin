@@ -84,20 +84,8 @@ def _find_electron_bin():
     return None
 
 
-def _decrypt_credentials(auth_file):
-    """调用 wbcred.js（Node helper）解密加密凭据，返回 (session_dict|None, 原因)。
-
-    helper 必须以 ELECTRON_RUN_AS_NODE=1 用 WorkBuddy 二进制运行：密钥由魔改
-    Framework 的 native binding 提供，不落盘、不经过本脚本。
-    """
-    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wbcred.js")
-    electron = _find_electron_bin()
-    if not electron:
-        return None, "未找到 WorkBuddy 桌面端二进制（可设 WORKBUDDY_ELECTRON_BIN 指定）"
-    if not os.path.exists(helper):
-        return None, "wbcred.js 缺失（与 signin.py 同目录）"
-    env = dict(os.environ)
-    env["ELECTRON_RUN_AS_NODE"] = "1"
+def _run_helper_once(electron, helper, auth_file, env):
+    """单次运行解密 helper，返回 (stdout|None, 错误原因|None)。"""
     try:
         proc = subprocess.run(
             [electron, helper, auth_file],
@@ -107,8 +95,35 @@ def _decrypt_credentials(auth_file):
         return None, "解密 helper 超时"
     except OSError as e:
         return None, "无法启动解密 helper: %s" % e
+    return proc.stdout, None
+
+
+def _decrypt_credentials(auth_file):
+    """调用 wbcred.js（Node helper）解密加密凭据，返回 (session_dict|None, 原因)。
+
+    helper 必须以 ELECTRON_RUN_AS_NODE=1 用 WorkBuddy 二进制运行：密钥由魔改
+    Framework 的 native binding 提供，不落盘、不经过本脚本。
+
+    超时视为偶发抖动（实测发生于客户端内部刷新凭据时拖慢子进程），
+    隔几秒重试一次；其余失败（缺二进制、输出异常等）是确定性错误，重试无益。
+    """
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wbcred.js")
+    electron = _find_electron_bin()
+    if not electron:
+        return None, "未找到 WorkBuddy 桌面端二进制（可设 WORKBUDDY_ELECTRON_BIN 指定）"
+    if not os.path.exists(helper):
+        return None, "wbcred.js 缺失（与 signin.py 同目录）"
+    env = dict(os.environ)
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    stdout, err = _run_helper_once(electron, helper, auth_file, env)
+    if err == "解密 helper 超时":
+        sys.stderr.write("解密 helper 超时，3 秒后重试一次...\n")
+        time.sleep(3)
+        stdout, err = _run_helper_once(electron, helper, auth_file, env)
+    if err:
+        return None, err
     try:
-        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        data = json.loads(stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return None, "解密 helper 输出异常"
     if data.get("result") != "OK":
